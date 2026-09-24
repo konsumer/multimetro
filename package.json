@@ -1,0 +1,11 @@
+{
+  "name": "multimetro",
+  "version": "1.0.0",
+  "private": true,
+  "description": "A metronome that follows a song structure: tempo, time signature and measures per section.",
+  "type": "module",
+  "scripts": {
+    "start": "npx -y serve .",
+    "fmt": "npx -y prettier -w ."
+  }
+}

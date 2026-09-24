@@ -1,0 +1,143 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <title>MultiMetro — song-structure metronome</title>
+    <meta name="description" content="A metronome that follows your song: set tempo, time signature and measures per section." />
+    <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🥁</text></svg>" />
+    <link href="https://cdn.jsdelivr.net/npm/daisyui@5/daisyui.css" rel="stylesheet" type="text/css" />
+    <script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4"></script>
+    <script>
+      // daisyUI ships a light and a dark theme; follow whatever the OS asks for.
+      ;(() => {
+        const scheme = matchMedia('(prefers-color-scheme: dark)')
+        const apply = () => (document.documentElement.dataset.theme = scheme.matches ? 'dark' : 'light')
+        scheme.addEventListener('change', apply)
+        apply()
+      })()
+    </script>
+    <style type="text/tailwindcss">
+      @media (prefers-reduced-motion: reduce) {
+        * {
+          animation: none !important;
+          transition: none !important;
+        }
+      }
+    </style>
+  </head>
+
+  <body class="bg-base-200 min-h-screen">
+    <div class="navbar bg-base-100 shadow-sm sticky top-0 z-30">
+      <div class="flex min-w-0 flex-1 items-center gap-2 px-2">
+        <span class="text-2xl">🥁</span>
+        <span class="text-xl font-bold">MultiMetro</span>
+      </div>
+      <div class="flex min-w-0 flex-none items-center gap-1">
+        <select id="songSelect" class="select select-sm select-bordered w-32 sm:w-48" aria-label="Song"></select>
+        <div class="dropdown dropdown-end">
+          <div tabindex="0" role="button" class="btn btn-ghost btn-sm text-lg leading-none" aria-label="Menu">⋯</div>
+          <ul tabindex="0" class="menu dropdown-content bg-base-100 rounded-box z-40 w-60 p-2 shadow-lg">
+            <li class="menu-title text-xs">Songs</li>
+            <li><button id="newBtn">New song</button></li>
+            <li><button id="dupSongBtn">Duplicate song</button></li>
+            <li><button id="delSongBtn" class="text-error">Delete song</button></li>
+            <li class="menu-title text-xs">Transfer</li>
+            <li><button id="shareBtn">Copy share link</button></li>
+            <li><button id="exportBtn">Export JSON</button></li>
+            <li><button id="importBtn">Import JSON</button></li>
+          </ul>
+        </div>
+      </div>
+    </div>
+
+    <main class="mx-auto grid max-w-6xl gap-4 p-4 lg:grid-cols-[1fr_22rem]">
+      <section class="order-2 lg:order-1">
+        <div class="mb-3 flex flex-wrap items-center justify-between gap-2">
+          <input id="songName" class="input input-ghost w-full min-w-0 px-2 text-lg font-semibold sm:w-auto sm:max-w-xs sm:flex-1" maxlength="60" aria-label="Song name" />
+          <div class="flex items-center gap-2">
+            <span id="songSummary" class="text-base-content/60 text-sm"></span>
+            <button id="clearBtn" class="btn btn-ghost btn-xs">Reset</button>
+          </div>
+        </div>
+        <div id="sections" class="flex flex-col gap-3"></div>
+        <button id="addBtn" class="btn btn-outline btn-block mt-3">+ Add section</button>
+      </section>
+
+      <section class="order-1 lg:order-2">
+        <div class="card bg-base-100 shadow-lg lg:sticky lg:top-20">
+          <div class="card-body gap-4 p-5">
+            <div class="text-center">
+              <div id="nowName" class="truncate text-sm font-medium opacity-70">Ready</div>
+              <div class="flex items-end justify-center gap-2">
+                <span id="nowBpm" class="text-6xl font-black tabular-nums leading-none">—</span>
+                <span class="mb-1 text-sm opacity-60">BPM</span>
+              </div>
+              <div class="mt-1 flex items-center justify-center gap-3 text-sm opacity-70">
+                <span id="nowSig" class="badge badge-neutral badge-sm tabular-nums">4/4</span>
+                <span id="nowMeasure" class="tabular-nums">measure —</span>
+              </div>
+            </div>
+
+            <div id="beatDots" class="flex min-h-9 flex-wrap items-center justify-center gap-2"></div>
+
+            <div class="flex items-center gap-2">
+              <button id="playBtn" class="btn btn-primary flex-1">▶ Play</button>
+              <label class="btn btn-ghost gap-2" title="Loop the whole song">
+                <input id="loop" type="checkbox" class="toggle toggle-sm toggle-primary" />
+                Loop
+              </label>
+            </div>
+
+            <label class="label cursor-pointer justify-start gap-3 py-0">
+              <input id="countIn" type="checkbox" class="checkbox checkbox-sm" />
+              <span class="label-text">Count in one measure</span>
+            </label>
+
+            <div class="flex items-center gap-3">
+              <span class="text-sm opacity-60">Vol</span>
+              <input id="volume" type="range" min="0" max="100" value="80" class="range range-sm range-primary" />
+            </div>
+
+            <progress id="progress" class="progress progress-primary h-1.5" value="0" max="100"></progress>
+            <div class="flex justify-between text-xs tabular-nums opacity-60">
+              <span id="elapsed">0:00</span>
+              <span id="total">0:00</span>
+            </div>
+            <p class="text-xs opacity-50">Space = play/stop. Tempo is beats of the lower number (120 in 6/8 = 120 eighth notes).</p>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <dialog id="ioDialog" class="modal">
+      <div class="modal-box">
+        <h3 id="ioTitle" class="text-lg font-bold">Song JSON</h3>
+        <textarea id="ioText" class="textarea textarea-bordered mt-3 h-64 w-full font-mono text-xs" spellcheck="false"></textarea>
+        <div class="modal-action">
+          <button id="ioApply" class="btn btn-primary">Load</button>
+          <form method="dialog"><button class="btn">Close</button></form>
+        </div>
+      </div>
+      <form method="dialog" class="modal-backdrop"><button>close</button></form>
+    </dialog>
+
+    <dialog id="confirmDialog" class="modal">
+      <div class="modal-box">
+        <h3 class="text-lg font-bold">Are you sure?</h3>
+        <p id="confirmText" class="py-3"></p>
+        <div class="modal-action">
+          <button id="confirmYes" class="btn btn-error">Delete</button>
+          <form method="dialog"><button class="btn">Cancel</button></form>
+        </div>
+      </div>
+      <form method="dialog" class="modal-backdrop"><button>close</button></form>
+    </dialog>
+
+    <div class="toast toast-end z-50">
+      <div id="toast" class="alert alert-success hidden"><span id="toastText"></span></div>
+    </div>
+
+    <script type="module" src="./src/app.js"></script>
+  </body>
+</html>
