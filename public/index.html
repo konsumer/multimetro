@@ -105,6 +105,19 @@
               <span id="total">0:00</span>
             </div>
             <p class="text-xs opacity-50">Space = play/stop. Tempo is beats of the lower number (120 in 6/8 = 120 eighth notes).</p>
+
+            <div class="divider my-0 text-xs opacity-70">Band sync</div>
+
+            <input id="playerName" class="input input-sm input-bordered w-full" placeholder="Your name" maxlength="24" aria-label="Your name" />
+            <div class="join w-full">
+              <input id="roomCode" class="input input-sm input-bordered join-item w-full uppercase" placeholder="Room code" maxlength="8" aria-label="Room code" />
+              <button id="diceBtn" class="btn btn-sm join-item" title="Make up a code">🎲</button>
+              <button id="joinBtn" class="btn btn-sm btn-primary join-item">Join</button>
+            </div>
+            <div id="syncStatus" class="text-xs opacity-60">Solo — not in a room</div>
+            <div id="members" class="flex flex-wrap gap-1"></div>
+            <button id="roomLinkBtn" class="btn btn-ghost btn-xs hidden">Copy room link</button>
+            <button id="keepSongBtn" class="btn btn-outline btn-xs hidden">Save this arrangement to my songs</button>
           </div>
         </div>
       </section>
@@ -138,6 +151,6 @@
       <div id="toast" class="alert alert-success hidden"><span id="toastText"></span></div>
     </div>
 
-    <script type="module" src="./src/app.js"></script>
+    <script type="module" src="./js/app.js"></script>
   </body>
 </html>

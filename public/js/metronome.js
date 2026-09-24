@@ -16,6 +16,7 @@ export class Metronome {
     this.sections = []
     this.queue = []
     this.pos = { section: 0, measure: 0, beat: 0 }
+    this.origin = 0
     this.nextTime = 0
     this.endTime = 0
     this.done = false
@@ -25,25 +26,45 @@ export class Metronome {
     this.timer = null
   }
 
-  async start(sections, { loop = false, volume = 0.8 } = {}) {
-    this.stop({ silent: true })
-    if (!sections.length) return
-
+  // Creating the context needs a user gesture, so callers prime it from a
+  // click even when they are not starting playback yet. resume() can sit
+  // unsettled forever when the browser is not satisfied the gesture was real,
+  // so it never gets to block anything: check `armed` afterwards instead.
+  async prime() {
     if (!this.ctx) {
       this.ctx = new (window.AudioContext || window.webkitAudioContext)()
       this.gain = this.ctx.createGain()
       this.gain.connect(this.ctx.destination)
     }
-    await this.ctx.resume()
+    if (this.ctx.state !== 'running') {
+      await Promise.race([this.ctx.resume().catch(() => {}), new Promise((done) => setTimeout(done, 300))])
+    }
+    return this.ctx
+  }
+
+  get armed() {
+    return !!this.ctx && this.ctx.state === 'running'
+  }
+
+  // `at` is an AudioContext timestamp for beat one. A time that has already
+  // passed is fine: the grid is wound forward to wherever it is now, which is
+  // how a late joiner lands in the right bar.
+  async start(sections, { loop = false, volume = 0.8, at = null } = {}) {
+    this.stop({ silent: true })
+    if (!sections.length) return
+
+    await this.prime()
 
     this.sections = sections
     this.loop = loop
     this.setVolume(volume)
     this.queue = []
     this.pos = { section: 0, measure: 0, beat: 0 }
-    this.nextTime = this.ctx.currentTime + 0.1
+    this.origin = at === null ? this.ctx.currentTime + 0.1 : at
+    this.nextTime = this.origin
     this.done = false
     this.playing = true
+    this.catchUp()
 
     this.tick()
     this.timer = setInterval(() => this.tick(), LOOKAHEAD_MS)
@@ -66,6 +87,29 @@ export class Metronome {
   tick() {
     this.schedule()
     this.drain()
+  }
+
+  // Wind the grid forward over beats whose moment has already gone by.
+  catchUp() {
+    const now = this.ctx.currentTime
+    let guard = 100000
+    while (!this.done && this.nextTime < now && guard-- > 0) {
+      this.nextTime += 60 / this.sections[this.pos.section].bpm
+      this.advance()
+    }
+  }
+
+  // Nudge an in-flight grid back onto a re-measured start time. Clocks on two
+  // devices drift a millisecond or two a minute; corrections this small are
+  // inaudible, and clamping keeps a bad clock sample from lurching the beat.
+  resync(origin) {
+    if (!this.playing || this.done) return 0
+    const drift = origin - this.origin
+    if (Math.abs(drift) < 0.003) return 0
+    const step = Math.max(-0.02, Math.min(0.02, drift))
+    this.origin += step
+    this.nextTime += step
+    return step
   }
 
   schedule() {

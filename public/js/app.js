@@ -1,6 +1,9 @@
 import { Metronome } from './metronome.js'
+import { Sync, roomCode } from './sync.js'
 
 const STORE_KEY = 'multimetro.library'
+const NAME_KEY = 'multimetro.name'
+const LEAD_MS = 1200 // head start a shared play gets, so everyone hears beat one together
 const LEGACY_KEY = 'multimetro.song'
 
 const DEFAULT_SONG = {
@@ -155,6 +158,7 @@ function currentSong() {
 
 function save() {
   song.updated = Date.now()
+  if (song.transient) return // on loan from a room; not ours to persist
   try {
     localStorage.setItem(STORE_KEY, JSON.stringify({ currentId: song.id, songs: library.songs }))
     localStorage.removeItem(LEGACY_KEY)
@@ -197,13 +201,18 @@ function render() {
   list.innerHTML = song.sections.map(card).join('')
   updateSummaries()
   showIdle()
+  updateSyncUi()
   save()
 }
 
 function renderSongList() {
   const select = $('#songSelect')
-  select.innerHTML = library.songs.map((s) => `<option value="${s.id}" ${s.id === song.id ? 'selected' : ''}>${esc(s.name)}</option>`).join('')
-  select.disabled = library.songs.length < 2
+  const options = library.songs.map((s) => `<option value="${s.id}" ${s.id === song.id ? 'selected' : ''}>${esc(s.name)}</option>`)
+  // A room arrangement is only on loan until it is saved, so it sits above the
+  // library rather than in it.
+  if (song.transient) options.unshift(`<option value="${song.id}" selected>${esc(song.name)} (room)</option>`)
+  select.innerHTML = options.join('')
+  select.disabled = options.length < 2
   if ($('#songName').value !== song.name) $('#songName').value = song.name
 }
 
@@ -388,13 +397,16 @@ $('#newBtn').addEventListener('click', () => {
 
 $('#dupSongBtn').addEventListener('click', () => {
   const copy = normalizeSong(plainSong())
-  copy.name = uniqueName(`${song.name} copy`)
-  library.songs.splice(library.songs.indexOf(song) + 1, 0, copy)
+  copy.name = uniqueName(song.transient ? song.name : `${song.name} copy`)
+  const at = library.songs.indexOf(song)
+  library.songs.splice(at < 0 ? library.songs.length : at + 1, 0, copy)
   selectSong(copy.id)
   toast('Song duplicated')
 })
 
 $('#delSongBtn').addEventListener('click', async () => {
+  // A room arrangement is not in the library — leaving it just drops the loan.
+  if (song.transient) return selectSong(library.songs[0].id)
   if (library.songs.length === 1) return toast('That is your only song')
   if (!(await confirmAction(`Delete “${song.name}”? This cannot be undone.`))) return
   const index = library.songs.indexOf(song)
@@ -441,14 +453,50 @@ function playList() {
   return sections
 }
 
+// In a room nobody starts locally: the press is sent to the room and everyone,
+// the presser included, starts when the room's copy of the message comes back.
 async function play() {
-  await metro.start(playList(), { loop: $('#loop').checked, volume: Number($('#volume').value) / 100 })
+  // A run is already in flight: catch up to the room rather than restarting
+  // the band. This is how a device that missed the start gets back in.
+  if (sync.connected && shared) {
+    await metro.prime()
+    return beginAt(audioTimeFor(shared.startAt))
+  }
+
+  if (sync.connected) {
+    await metro.prime()
+    return sync.play({
+      startAt: sync.now() + LEAD_MS,
+      loop: $('#loop').checked,
+      countIn: $('#countIn').checked,
+      song: plainSong()
+    })
+  }
+  await beginAt(null)
+}
+
+async function beginAt(at) {
+  await metro.start(playList(), { loop: $('#loop').checked, volume: Number($('#volume').value) / 100, at })
   $('#playBtn').textContent = '■ Stop'
   $('#playBtn').classList.replace('btn-primary', 'btn-error')
 }
 
+function stop() {
+  // Clearing `shared` first marks this as a deliberate stop, so onStop does
+  // not report the end to the room a second time.
+  if (sync.connected) {
+    shared = null
+    sync.stop()
+  }
+  metro.stop()
+}
+
 function onStop() {
-  $('#playBtn').textContent = '▶ Play'
+  // Ran off the end of the song: tell the room, so it stops telling late
+  // joiners about a run that is already over.
+  if (shared && sync.connected) sync.stop()
+  shared = null
+  $('#playBtn').textContent = sync.connected ? '▶ Play for all' : '▶ Play'
   $('#playBtn').classList.replace('btn-error', 'btn-primary')
   $('#progress').value = 0
   $('#elapsed').textContent = '0:00'
@@ -507,14 +555,14 @@ function renderDots(count, active, countIn = false) {
   })
 }
 
-$('#playBtn').addEventListener('click', () => (metro.playing ? metro.stop() : play()))
+$('#playBtn').addEventListener('click', () => (metro.playing ? stop() : play()))
 $('#volume').addEventListener('input', (event) => metro.setVolume(Number(event.target.value) / 100))
 $('#loop').addEventListener('change', (event) => (metro.loop = event.target.checked))
 
 document.addEventListener('keydown', (event) => {
   if (event.code !== 'Space' || event.target.matches('input, textarea, select, button')) return
   event.preventDefault()
-  metro.playing ? metro.stop() : play()
+  metro.playing ? stop() : play()
 })
 
 // --- share / import / export --------------------------------------------
@@ -557,5 +605,170 @@ $('#ioApply').addEventListener('click', () => {
     toast(`Could not read that JSON: ${err.message}`)
   }
 })
+
+// --- band sync -----------------------------------------------------------
+
+let shared = null // { startAt } of the run the room is currently on
+let statusText = 'Solo — not in a room'
+
+const sync = new Sync({
+  onStatus: (text) => {
+    statusText = text
+    showStatus()
+  },
+  onClock: () => {
+    showStatus()
+    // Re-measured the room clock: ease the running grid back onto it.
+    if (shared && metro.playing) metro.resync(audioTimeFor(shared.startAt))
+  },
+  onMembers: renderMembers,
+  onWelcome: (message) => {
+    statusText = `In room ${sync.room}`
+    showStatus()
+    updateSyncUi()
+    // Joined mid-song: pick the beat up where the room already is.
+    if (message.playing) startShared(message.playing, message.song)
+    else if (message.song) adoptSong(message.song)
+  },
+  onPlay: (message) => startShared(message, message.song),
+  onStop: (message) => {
+    shared = null
+    metro.stop()
+    if (message.by) toast(`${message.by} stopped`)
+  },
+  onSong: (message) => adoptSong(message.song)
+})
+
+// Where an instant on the room's clock lands on this device's audio clock.
+function audioTimeFor(startAt) {
+  return metro.ctx.currentTime + (startAt - sync.now()) / 1000
+}
+
+async function startShared(message, songData) {
+  if (songData) adoptSong(songData)
+  // The whole room counts in together or not at all, otherwise the ones who
+  // counted in are a bar behind everyone else.
+  $('#loop').checked = !!message.loop
+  $('#countIn').checked = !!message.countIn
+  shared = { startAt: message.startAt }
+
+  await metro.prime()
+  if (!metro.armed) {
+    // The browser is still holding audio back on this device. `shared` stays
+    // set, so tapping Play drops them into the run already in progress.
+    return toast('Tap Play to let this device make sound')
+  }
+
+  await beginAt(audioTimeFor(message.startAt))
+  if (message.by) toast(`Started by ${message.by}`)
+}
+
+// Play what the room is playing, without quietly overwriting the local library.
+function adoptSong(data) {
+  const incoming = normalizeSong(data)
+  if (!incoming || fingerprint(incoming) === fingerprint(song)) return
+
+  const mine = library.songs.find((s) => fingerprint(s) === fingerprint(incoming))
+  if (mine) {
+    library.currentId = mine.id
+    song = mine
+  } else {
+    incoming.transient = true
+    song = incoming
+  }
+  render()
+}
+
+function showStatus() {
+  const latency = sync.connected && sync.rtt ? ` · clock ±${Math.round(sync.rtt / 2)}ms` : ''
+  $('#syncStatus').textContent = statusText + latency
+}
+
+function renderMembers(members) {
+  $('#members').innerHTML = members.map((name) => `<span class="badge badge-sm badge-ghost">${esc(name)}</span>`).join('')
+}
+
+function updateSyncUi() {
+  const inRoom = sync.wanted
+  $('#joinBtn').textContent = inRoom ? 'Leave' : 'Join'
+  $('#joinBtn').classList.toggle('btn-primary', !inRoom)
+  $('#roomCode').disabled = inRoom
+  $('#diceBtn').disabled = inRoom
+  $('#roomLinkBtn').classList.toggle('hidden', !inRoom)
+  $('#keepSongBtn').classList.toggle('hidden', !song.transient)
+  if (!metro.playing) $('#playBtn').textContent = sync.connected ? '▶ Play for all' : '▶ Play'
+}
+
+function playerName() {
+  const typed = $('#playerName').value.trim()
+  return typed || `Player ${Math.random().toString(36).slice(2, 5).toUpperCase()}`
+}
+
+$('#diceBtn').addEventListener('click', () => ($('#roomCode').value = roomCode()))
+
+$('#playerName').addEventListener('change', () => {
+  try {
+    localStorage.setItem(NAME_KEY, $('#playerName').value.trim())
+  } catch (err) {
+    console.warn('could not save name', err)
+  }
+})
+
+$('#joinBtn').addEventListener('click', async () => {
+  if (sync.wanted) {
+    sync.leave()
+    shared = null
+    updateSyncUi()
+    return
+  }
+
+  const code = $('#roomCode').value.trim().toUpperCase()
+  if (!/^[A-Z0-9]{4,8}$/.test(code)) return toast('Room codes are 4–8 letters or numbers')
+
+  // This click is the gesture that buys us audio later, when someone else
+  // presses play. Never wait on it — joining must not hinge on the browser's
+  // autoplay mood.
+  metro.prime().catch((err) => console.warn('audio blocked', err))
+
+  $('#roomCode').value = code
+  $('#playerName').value = playerName()
+  $('#playerName').dispatchEvent(new Event('change'))
+  sync.join(code, $('#playerName').value)
+  updateSyncUi()
+})
+
+$('#roomLinkBtn').addEventListener('click', async () => {
+  const url = `${location.origin}${location.pathname}#room=${sync.room}`
+  try {
+    await navigator.clipboard.writeText(url)
+    toast('Room link copied')
+  } catch (err) {
+    console.warn('clipboard blocked', err)
+    openDialog('Room link', url, false)
+  }
+})
+
+$('#keepSongBtn').addEventListener('click', () => {
+  // Already the current song — adopt it in place so the click keeps running.
+  delete song.transient
+  song.name = uniqueName(song.name)
+  library.songs.push(song)
+  library.currentId = song.id
+  render()
+  toast('Saved to your songs')
+})
+
+try {
+  $('#playerName').value = localStorage.getItem(NAME_KEY) || ''
+} catch (err) {
+  console.warn('could not read name', err)
+}
+
+const invited = new URLSearchParams(location.hash.slice(1)).get('room')
+if (invited) {
+  $('#roomCode').value = invited.toUpperCase().slice(0, 8)
+  statusText = 'Tap Join to sync with the band'
+  showStatus()
+}
 
 render()
